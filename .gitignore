@@ -3,3 +3,6 @@
 *.out
 *.bin
 *.so
+*.csv
+*.png
+*.npy
