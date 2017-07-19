@@ -1,7 +1,7 @@
 import theano
 from theano import tensor, gof
 from theano.tensor.blas import ldflags
-from mkl_simplernn_backward import SimpleRNNGradInputs
+from mkl_simplernn_backward import SimpleRNNGradInputs, SimpleRNNGradWeights
 
 class SimpleRNN(gof.Op):
     __props__ = ('hid', 'step', 'dim', 'return_sequences')
@@ -32,7 +32,7 @@ class SimpleRNN(gof.Op):
         return gof.Apply(self, inp, out)
 
     def c_headers(self):
-        headers = ['<mkl.h>', '<omp.h>']
+        headers = ['<mkl.h>', '<omp.h>', '<math.h>']
         return headers
 
     def c_libraries(self):
@@ -172,6 +172,15 @@ class SimpleRNN(gof.Op):
             %(d)s* w_h_ptr = NULL;
             %(d)s* b_ptr = NULL;
 
+            double total_tic = 0.0;
+            double total_toc = 0.0;
+
+            total_tic = dsecnd();
+
+            double tic = 0.0;
+            double toc = 0.0;
+            double gemm = 0.0;
+
             if (A == NULL)
                 A = (%(d)s**)mkl_malloc(time_step * sizeof (%(d)s*), 64);
 
@@ -240,7 +249,7 @@ class SimpleRNN(gof.Op):
         if with_bias:
             ccode += """
             b_ptr = (%(d)s*) PyArray_DATA(%(b)s);
-            #pragma omp parallel for
+            // #pragma omp parallel for
             for (int i = 0; i < time_step; i++) {
                 for (int j = 0; j < batch_size; j++) {
                 size_t offset = %(hid)s * j + %(hid)s * batch_size * i;
@@ -250,7 +259,7 @@ class SimpleRNN(gof.Op):
             """ % locals()
         else:
             ccode += """
-            memset((char*)temp, 0, time_step * batch_size * %(hid)s * sizeof (%(d)s));
+            memset((void*)temp, 0, time_step * batch_size * %(hid)s * sizeof (%(d)s));
             """ % locals()
 
         ccode += """
@@ -268,9 +277,16 @@ class SimpleRNN(gof.Op):
                 C[i] = temp + i * m_g[0] * n_g[0];
             }
             // Batch Gemm for dot(x, w_x) + b
-            cblas_%(dtype)sgemm_batch(CblasRowMajor, transA_g, transB_g, m_g, n_g, k_g,
-                                      alpha_g, A, lda_g, B, ldb_g, beta_g, C, ldc_g, 1, size_per_grp);
-
+            tic = dsecnd();
+            if (time_step > 1) {
+                cblas_%(dtype)sgemm_batch(CblasRowMajor, transA_g, transB_g, m_g, n_g, k_g,
+                                          alpha_g, A, lda_g, B, ldb_g, beta_g, C, ldc_g, 1, size_per_grp);
+            } else {
+                cblas_%(dtype)sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, batch_size, %(hid)s, embed_dims,
+                                    1.0, x_ptr, embed_dims, w_x_ptr, %(hid)s, 1.0, temp, %(hid)s);
+            }
+            toc = dsecnd();
+            gemm = (toc - tic);
             // construct output
             npy_intp dims[3] = {0, 0, 0};
             if (NULL == %(z)s) {
@@ -301,19 +317,25 @@ class SimpleRNN(gof.Op):
                 goto simplernn_fail;
             }
 
-            memset((char*)hid_state, 0, batch_size * %(hid)s * sizeof (%(d)s));
+            memset((void*)hid_state, 0, batch_size * %(hid)s * sizeof (%(d)s));
 
             size_t size_per_batch = batch_size * %(hid)s * sizeof (%(d)s);
             for (int i = 0; i < time_step; i++) {
                 // Gemm for dot(h_tm1, w_h) + temp
                 %(d)s* p = temp + i * batch_size * %(hid)s;
+                tic = dsecnd();
                 cblas_%(dtype)sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, batch_size, %(hid)s, %(hid)s,
                                     1.0, hid_state, %(hid)s, w_h_ptr, %(hid)s, 1.0, p, %(hid)s);
+                toc = dsecnd();
+                gemm += (toc - tic);
 
-                if (i != (time_step - 1))
-                    v%(dtype)sTanh(batch_size * %(hid)s, temp + i * batch_size * %(hid)s, hid_state);
-                else
-                    memcpy ((char*)hid_state, (char*)p, batch_size * %(hid)s * sizeof (%(d)s));
+                // %(d)s* ptr = temp + i * batch_size * %(hid)s;
+                #pragma omp parallel for
+                for (int t = 0; t < batch_size * %(hid)s; t++) {
+                    hid_state[t] = (%(d)s) tanh((double)(p[t]));
+                }
+
+                // v%(dtype)sTanh(batch_size * %(hid)s, temp + i * batch_size * %(hid)s, hid_state);
                 if (%(return_sequences)s) {
                     memcpy(((char*)PyArray_DATA(%(z)s)) + i * size_per_batch,
                             (char*)hid_state,
@@ -326,7 +348,9 @@ class SimpleRNN(gof.Op):
                     }
                 }
             }
+            total_toc = dsecnd();
 
+            // printf(\"gemm time: %%.8f, total time: %%.8f\\n\", gemm, total_toc - total_tic);
             simplernn_fail:
             Py_XDECREF(x_src);
             Py_XDECREF(w_x_src);
@@ -340,11 +364,12 @@ class SimpleRNN(gof.Op):
         gz, = grads
         hid = SimpleRNN(self.hid, self.step, self.dim, self.return_sequences)(*inp)
         gradX = SimpleRNNGradInputs(self.hid, self.step, self.dim, self.return_sequences)(w_x, w_h, hid, gz)
+        gradW, gradU, gradB = SimpleRNNGradWeights(self.hid, self.step, self.dim, self.return_sequences)(x, w_h, hid, gz)
 
         if len(inp) is 3:
-            return [gradX, gradX, gradX]
+            return [gradX, gradW, gradU]
         else:
-            return [gradX, gradX, gradX, gradX]
+            return [gradX, gradW, gradU, gradB]
 
     def c_code_cache_version(self):
         return (1, 0, 0)

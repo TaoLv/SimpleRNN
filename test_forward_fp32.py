@@ -9,7 +9,7 @@ import time
 np.random.seed(12345)
 
 units = 1000    # int(sys.argv[1])
-timesteps = 20  # int(sys.argv[2])
+timesteps = 4  # int(sys.argv[2])
 batch_size = 80 # int(sys.argv[3])
 input_dim = 620 # int(sys.argv[4])
 
@@ -18,12 +18,12 @@ print "timesteps=", timesteps
 print "batch_size=", batch_size
 print "input_dim=", input_dim
 
-x = np.random.rand(timesteps, batch_size, input_dim).astype(np.float64)
-w_x = np.random.rand(input_dim, units).astype(np.float64) - np.random.rand(input_dim, units).astype(np.float64)
-w_h = np.random.rand(units, units).astype(np.float64) - np.random.rand(units, units).astype(np.float64)
-b = np.zeros(units, dtype=np.float64)
+x = np.random.rand(timesteps, batch_size, input_dim).astype(np.float32)
+w_x = np.random.rand(input_dim, units).astype(np.float32) - np.random.rand(input_dim, units).astype(np.float32)
+w_h = np.random.rand(units, units).astype(np.float32) - np.random.rand(units, units).astype(np.float32)
+b = np.zeros(units, dtype=np.float32)
 
-h_init = np.zeros((batch_size, units), dtype=np.float64)
+h_init = np.zeros((batch_size, units), dtype=np.float32)
 
 
 def SimpleRNN_NP():
@@ -40,10 +40,10 @@ def SimpleRNN_NP():
 
 def SimpleRNN_MKL():
     global x, h_init, w_x, w_h, b, units
-    X = T.dtensor3('X')
-    W_x = T.dmatrix('W_x')
-    W_h = T.dmatrix('W_h')
-    B = T.dvector('B') 
+    X = T.ftensor3('X')
+    W_x = T.fmatrix('W_x')
+    W_h = T.fmatrix('W_h')
+    B = T.fvector('B') 
 
     o = SimpleRNN(hid=units, return_sequences=True)(X, W_x, W_h)
 
@@ -62,11 +62,11 @@ def SimpleRNN_MKL():
 
 
 def SimpleRNN_theano():
-    X = T.dtensor3('X')
-    W_x = T.dmatrix('W_x')
-    W_h = T.dmatrix('W_h')
-    B = T.dvector('B')
-    Hid = T.dmatrix('hid')
+    X = T.ftensor3('X')
+    W_x = T.fmatrix('W_x')
+    W_h = T.fmatrix('W_h')
+    B = T.fvector('B')
+    Hid = T.fmatrix('hid')
 
     def step(x, h):
         h = T.tanh(T.dot(x, W_x) + T.dot(h, W_h))
